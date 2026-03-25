@@ -1,5 +1,5 @@
 """
-File Type Identifier — Core Engine
+File Type Identifier - Core Engine
 Reads file header magic bytes, detects type, cross-checks extension,
 and flags mismatches / disguised files using the expanded signature database.
 """
@@ -13,9 +13,9 @@ from magic_bytes_db import SIGNATURES, EXTENSION_TYPE_MAP, lookup_risk
 HEADER_READ_SIZE = 512
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Core Detection
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def read_header(file_path: str, size: int = HEADER_READ_SIZE) -> bytes | None:
     try:
@@ -58,32 +58,31 @@ def check_mismatch(file_path: str, matches: list[dict]) -> dict:
     Returns a full mismatch report dict.
     """
     ext = Path(file_path).suffix.lower()
-    filename = Path(file_path).name
 
     if not ext:
         return {
-            "has_extension": False,
-            "extension": None,
+            "has_extension":  False,
+            "extension":      None,
             "expected_types": [],
-            "detected_labels": [],
-            "mismatch": False,
-            "risk_level": "UNKNOWN",
-            "risk_note": "No extension — cannot cross-check.",
+            "detected_labels":[],
+            "mismatch":       False,
+            "risk_level":     "UNKNOWN",
+            "risk_note":      "No extension - cannot cross-check.",
         }
 
-    expected_types = EXTENSION_TYPE_MAP.get(ext, [])
+    expected_types  = EXTENSION_TYPE_MAP.get(ext, [])
     detected_labels = [m["label"] for m in matches]
 
     # A match exists if any detected type is in the expected list
     match_found = any(d in expected_types for d in detected_labels)
-    mismatch = bool(matches) and not match_found and bool(expected_types)
+    mismatch    = bool(matches) and not match_found and bool(expected_types)
 
     risk_level = "OK"
-    risk_note = ""
+    risk_note  = ""
 
     if mismatch:
         risk_level = "MISMATCH"
-        risk_note = (
+        risk_note  = (
             f"File claims to be '{ext.upper()}' but header says: "
             f"{', '.join(detected_labels[:3])}"
         )
@@ -92,20 +91,19 @@ def check_mismatch(file_path: str, matches: list[dict]) -> dict:
             result = lookup_risk(d_label, ext)
             if result:
                 level, msg = result
-                # Upgrade to highest risk found
                 risk_order = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-                if risk_order.get(level, 0) > risk_order.get(risk_level.replace("MISMATCH","LOW"), 0):
+                if risk_order.get(level, 0) > risk_order.get(risk_level.replace("MISMATCH", "LOW"), 0):
                     risk_level = level
-                    risk_note = f"⚠️  {level}: {msg}"
+                    risk_note  = f"[{level}] {msg}"
 
     return {
-        "has_extension":    True,
-        "extension":        ext,
-        "expected_types":   expected_types,
-        "detected_labels":  detected_labels,
-        "mismatch":         mismatch,
-        "risk_level":       risk_level,
-        "risk_note":        risk_note,
+        "has_extension":  True,
+        "extension":      ext,
+        "expected_types": expected_types,
+        "detected_labels":detected_labels,
+        "mismatch":       mismatch,
+        "risk_level":     risk_level,
+        "risk_note":      risk_note,
     }
 
 
@@ -113,10 +111,10 @@ def get_file_metadata(file_path: str) -> dict:
     try:
         stat = os.stat(file_path)
         return {
-            "size_bytes":  stat.st_size,
-            "size_human":  _human_size(stat.st_size),
-            "modified":    datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            "created":     datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "size_bytes": stat.st_size,
+            "size_human": _human_size(stat.st_size),
+            "modified":   datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "created":    datetime.fromtimestamp(stat.st_ctime).isoformat(),
         }
     except Exception:
         return {}
@@ -130,34 +128,83 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} PB"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Reason generator
+# Produces a plain-English explanation for every possible verdict.
+# -----------------------------------------------------------------------------
+
+def _build_reason(verdict: str, matches: list[dict], mr: dict, file_path: str) -> str:
+    ext = Path(file_path).suffix.lower() or "(none)"
+
+    if verdict == "ERROR":
+        return "Could not read the file."
+
+    if verdict == "UNKNOWN":
+        return (
+            "No matching signature was found in the database. "
+            "The file may be plain text, a config file, an unsupported format, "
+            "or the header may be corrupt or empty."
+        )
+
+    if verdict == "CLEAN":
+        pt = matches[0]
+        return (
+            f"The file header contains the magic bytes for '{pt['label']}' "
+            f"and the extension '{ext}' is a valid match for that format. "
+            f"No evasion detected."
+        )
+
+    # MISMATCH / LOW / MEDIUM / HIGH / CRITICAL
+    risk_note = mr.get("risk_note", "")
+    detected  = ", ".join(mr.get("detected_labels", [])[:3])
+
+    severity_context = {
+        "LOW":      "Low-severity mismatch. Could be a renamed or miscategorised file.",
+        "MEDIUM":   "Moderate-severity mismatch. The file type is suspicious for this extension.",
+        "HIGH":     "High-severity mismatch. This combination is commonly used to bypass filters.",
+        "CRITICAL": "Critical mismatch. This is a well-known attacker technique for delivering malicious payloads.",
+        "MISMATCH": "The detected file type does not match the extension.",
+    }
+
+    context = severity_context.get(verdict, "")
+    return (
+        f"Header identifies this as: {detected}. "
+        f"Extension '{ext}' does not match that type. "
+        f"{context} {risk_note}".strip()
+    )
+
+
+# -----------------------------------------------------------------------------
 # Main Analysis
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def analyze_file(file_path: str) -> dict:
     result = {
-        "file":           file_path,
-        "filename":       Path(file_path).name,
-        "timestamp":      datetime.now().isoformat(),
-        "status":         "ok",
-        "error":          None,
-        "metadata":       {},
-        "header_hex":     "",
-        "detected_types": [],
-        "primary_type":   None,
-        "mismatch_report":{},
-        "verdict":        "CLEAN",
+        "file":            file_path,
+        "filename":        Path(file_path).name,
+        "timestamp":       datetime.now().isoformat(),
+        "status":          "ok",
+        "error":           None,
+        "metadata":        {},
+        "header_hex":      "",
+        "detected_types":  [],
+        "primary_type":    None,
+        "mismatch_report": {},
+        "verdict":         "CLEAN",
+        "reason":          "",
     }
 
     if not os.path.isfile(file_path):
-        result.update(status="error", error="File not found", verdict="ERROR")
+        result.update(status="error", error="File not found", verdict="ERROR",
+                      reason="File not found on disk.")
         return result
 
     result["metadata"] = get_file_metadata(file_path)
 
     header = read_header(file_path)
     if header is None:
-        result.update(status="error", error="Cannot read file (permission denied)", verdict="ERROR")
+        result.update(status="error", error="Cannot read file (permission denied)",
+                      verdict="ERROR", reason="Permission denied when reading the file.")
         return result
 
     result["header_hex"] = header[:32].hex(" ").upper()
@@ -179,6 +226,8 @@ def analyze_file(file_path: str) -> dict:
     else:
         result["verdict"] = "CLEAN"
 
+    result["reason"] = _build_reason(result["verdict"], matches, mr, file_path)
+
     return result
 
 
@@ -194,19 +243,19 @@ def analyze_directory(dir_path: str, recursive: bool = False) -> list[dict]:
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pretty-print helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 VERDICT_COLORS = {
-    "CLEAN":    "\033[92m",
-    "UNKNOWN":  "\033[93m",
-    "LOW":      "\033[93m",
-    "MEDIUM":   "\033[33m",
-    "MISMATCH": "\033[91m",
-    "HIGH":     "\033[91m",
-    "CRITICAL": "\033[95m",
-    "ERROR":    "\033[90m",
+    "CLEAN":    "\033[92m",   # green
+    "UNKNOWN":  "\033[93m",   # yellow
+    "LOW":      "\033[93m",   # yellow
+    "MEDIUM":   "\033[33m",   # orange
+    "MISMATCH": "\033[91m",   # red
+    "HIGH":     "\033[91m",   # red
+    "CRITICAL": "\033[95m",   # magenta
+    "ERROR":    "\033[90m",   # grey
 }
 RESET = "\033[0m"
 BOLD  = "\033[1m"
@@ -225,7 +274,9 @@ def print_result(result: dict, verbose: bool = False):
         print(f"{BOLD}Size:{RESET}     {meta['size_human']}")
 
     if result["status"] == "error":
-        print(f"{BOLD}Status:{RESET}   {color}ERROR — {result['error']}{RESET}")
+        print(f"{BOLD}Verdict:{RESET}  {color}{BOLD}{v}{RESET}")
+        print(f"{BOLD}Reason:{RESET}   {result.get('reason', '')}")
+        print(f"{'─'*62}")
         return
 
     pt = result["primary_type"]
@@ -235,17 +286,15 @@ def print_result(result: dict, verbose: bool = False):
         if verbose and len(result["detected_types"]) > 1:
             print(f"          Also matches:")
             for m in result["detected_types"][1:4]:
-                print(f"            · {m['label']}")
+                print(f"            - {m['label']}")
     else:
-        print(f"{BOLD}Detected:{RESET} {color}UNKNOWN — no matching signature found{RESET}")
+        print(f"{BOLD}Detected:{RESET} {color}UNKNOWN - no matching signature found{RESET}")
 
     mr  = result.get("mismatch_report", {})
-    ext = mr.get("extension", "—")
+    ext = mr.get("extension", "-")
     print(f"{BOLD}Extension:{RESET}{ext}")
     print(f"{BOLD}Verdict:{RESET}  {color}{BOLD}{v}{RESET}")
-
-    if mr.get("mismatch") and mr.get("risk_note"):
-        print(f"{BOLD}Alert:{RESET}    {color}{mr['risk_note']}{RESET}")
+    print(f"{BOLD}Reason:{RESET}   {result.get('reason', '')}")
 
     if verbose:
         print(f"\n{BOLD}Header (hex, first 32 bytes):{RESET}")
@@ -254,25 +303,25 @@ def print_result(result: dict, verbose: bool = False):
         if expected:
             print(f"\n{BOLD}Expected type(s) for {ext}:{RESET}")
             for t in expected[:5]:
-                print(f"  · {t}")
+                print(f"  - {t}")
 
     print(f"{'─'*62}")
 
 
 def print_summary(results: list[dict]):
-    total = len(results)
-    order = ["CRITICAL","HIGH","MEDIUM","LOW","MISMATCH","UNKNOWN","CLEAN","ERROR"]
+    total  = len(results)
+    order  = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "MISMATCH", "UNKNOWN", "CLEAN", "ERROR"]
     counts: dict[str, int] = {k: 0 for k in order}
     for r in results:
         v = r.get("verdict", "ERROR")
         counts[v] = counts.get(v, 0) + 1
 
-    print(f"\n{'═'*62}")
-    print(f"{BOLD}SCAN SUMMARY — {total} file(s){RESET}")
-    print(f"{'═'*62}")
+    print(f"\n{'='*62}")
+    print(f"{BOLD}SCAN SUMMARY - {total} file(s){RESET}")
+    print(f"{'='*62}")
     for verdict in order:
         n = counts.get(verdict, 0)
         if n:
-            color = VERDICT_COLORS.get(verdict, "")
-            print(f"  {color}{verdict:<12}{RESET} {n}")
-    print(f"{'═'*62}\n")
+            c = VERDICT_COLORS.get(verdict, "")
+            print(f"  {c}{verdict:<12}{RESET} {n}")
+    print(f"{'='*62}\n")
