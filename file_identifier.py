@@ -180,18 +180,20 @@ def _build_reason(verdict: str, matches: list[dict], mr: dict, file_path: str) -
 
 def analyze_file(file_path: str) -> dict:
     result = {
-        "file":            file_path,
-        "filename":        Path(file_path).name,
-        "timestamp":       datetime.now().isoformat(),
-        "status":          "ok",
-        "error":           None,
-        "metadata":        {},
-        "header_hex":      "",
-        "detected_types":  [],
-        "primary_type":    None,
-        "mismatch_report": {},
-        "verdict":         "CLEAN",
-        "reason":          "",
+        "file":                file_path,
+        "filename":            Path(file_path).name,
+        "timestamp":           datetime.now().isoformat(),
+        "status":              "ok",
+        "error":               None,
+        "metadata":            {},
+        "header_hex":          "",
+        "detected_types":      [],
+        "primary_type":        None,
+        "mismatch_report":     {},
+        "deep_inspect_report": {},
+        "verdict":             "CLEAN",
+        "reason":              "",
+        "binwalk_suggested":   False,
     }
 
     if not os.path.isfile(file_path):
@@ -228,7 +230,138 @@ def analyze_file(file_path: str) -> dict:
 
     result["reason"] = _build_reason(result["verdict"], matches, mr, file_path)
 
+    # --- Deep inspection (runs on all files with a known primary type) ---
+    if matches:
+        di = deep_inspect(file_path, matches[0]["label"])
+        result["deep_inspect_report"] = di
+        if di["suspicious"]:
+            sev       = di["severity"]
+            sev_order = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+            cur_order = sev_order.get(result["verdict"], 0)
+            new_order = sev_order.get(sev, 0)
+            # Only upgrade verdict, never downgrade
+            if new_order > cur_order:
+                result["verdict"] = sev
+            result["binwalk_suggested"] = True
+            # Append deep-inspect findings to reason
+            findings_text = " | ".join(di["findings"])
+            result["reason"] += f"\n  [Deep Inspect] {findings_text}"
+
     return result
+
+
+# -----------------------------------------------------------------------------
+# Deep Inspection
+# Catches header-swapped polyglots and hidden embedded files that pass the
+# basic magic byte check — e.g. a PNG body with a JPEG header bolted on.
+# Runs only on files that initially appear CLEAN.
+# -----------------------------------------------------------------------------
+
+# Known end-of-file markers: (format_label_substring, marker_bytes, description)
+_EOF_MARKERS = [
+    ("JPEG",  b"\xff\xd9",                     "JPEG EOI"),
+    ("PDF",   b"%%EOF",                         "PDF EOF"),
+    ("GIF",   b"\x00\x3b",                      "GIF trailer"),
+    ("ZIP",   b"PK\x05\x06",                    "ZIP end-of-central-directory"),
+]
+
+# Signatures that should NOT appear inside a file of another type
+# (primary_label_substring, forbidden_sig, forbidden_sig_name)
+_FOREIGN_SIGS = [
+    ("JPEG",  b"\x89PNG\r\n\x1a\n",            "PNG signature"),
+    ("JPEG",  b"IHDR",                          "PNG IHDR chunk"),
+    ("JPEG",  b"IEND",                          "PNG IEND chunk"),
+    ("JPEG",  b"\x1a\x45\xdf\xa3",             "MKV/WebM signature"),
+    ("PNG",   b"\xff\xd8\xff",                  "JPEG SOI"),
+    ("PNG",   b"MZ",                            "PE/EXE signature"),
+    ("PNG",   b"\x7fELF",                       "ELF signature"),
+    ("GIF",   b"\xff\xd8\xff",                  "JPEG SOI"),
+    ("GIF",   b"\x89PNG",                       "PNG signature"),
+    ("PDF",   b"MZ",                            "PE/EXE signature"),
+    ("PDF",   b"\x7fELF",                       "ELF signature"),
+]
+
+# Signatures whose presence anywhere in the file body is always suspicious
+_EMBEDDED_ALARM_SIGS = [
+    (b"MZ",               "Windows PE/EXE",   "CRITICAL"),
+    (b"\x7fELF",          "Linux ELF binary", "CRITICAL"),
+    (b"PK\x03\x04",       "ZIP archive",      "HIGH"),
+    (b"\x1f\x8b\x08",     "GZIP stream",      "HIGH"),
+    (b"7z\xbc\xaf'",      "7-Zip archive",    "HIGH"),
+    (b"Rar!\x1a\x07",     "RAR archive",      "HIGH"),
+    (b"\x89PNG\r\n\x1a\n","PNG image",        "MEDIUM"),
+    (b"%PDF-",            "PDF document",     "MEDIUM"),
+    (b"\xff\xd8\xff",     "JPEG image",       "MEDIUM"),
+]
+
+def deep_inspect(file_path: str, primary_label: str) -> dict:
+    """
+    Reads the full file and checks for:
+      1. Missing expected EOF marker (header-swap / truncation)
+      2. Foreign format signatures inside the body
+      3. Embedded alarm signatures mid-file (appended/prepended payloads)
+
+    Returns a dict:
+      {
+        "suspicious": bool,
+        "severity":   "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"|"",
+        "findings":   [str, ...]          # human-readable findings list
+      }
+    """
+    try:
+        with open(file_path, "rb") as f:
+            body = f.read()
+    except (IOError, PermissionError):
+        return {"suspicious": False, "severity": "", "findings": []}
+
+    findings  = []
+    top_sev   = ""
+    sev_order = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+    def _upgrade(sev: str):
+        nonlocal top_sev
+        if sev_order.get(sev, 0) > sev_order.get(top_sev, 0):
+            top_sev = sev
+
+    label_up = primary_label.upper()
+
+    # 1 — Check for missing EOF marker
+    for fmt_sub, marker, marker_name in _EOF_MARKERS:
+        if fmt_sub.upper() in label_up:
+            if marker not in body:
+                findings.append(
+                    f"Missing {marker_name} end marker — file may have a swapped/fake header."
+                )
+                _upgrade("HIGH")
+
+    # 2 — Check for foreign signatures in the body (skip first 16 bytes = header area)
+    for fmt_sub, sig, sig_name in _FOREIGN_SIGS:
+        if fmt_sub.upper() in label_up:
+            idx = body.find(sig, 16)
+            if idx != -1:
+                findings.append(
+                    f"Found {sig_name} at offset {idx} inside a {fmt_sub} file — "
+                    f"possible polyglot or header-swap."
+                )
+                _upgrade("CRITICAL")
+
+    # 3 — Embedded alarm signatures anywhere past the header (offset > 32)
+    for sig, sig_name, sev in _EMBEDDED_ALARM_SIGS:
+        # Skip if this sig matches the file's own primary type
+        if sig_name.split()[0].upper() in label_up:
+            continue
+        idx = body.find(sig, 32)
+        if idx != -1:
+            findings.append(
+                f"Embedded {sig_name} signature at offset {idx}."
+            )
+            _upgrade(sev)
+
+    return {
+        "suspicious": bool(findings),
+        "severity":   top_sev,
+        "findings":   findings,
+    }
 
 
 def analyze_directory(dir_path: str, recursive: bool = False) -> list[dict]:
@@ -304,6 +437,22 @@ def print_result(result: dict, verbose: bool = False):
             print(f"\n{BOLD}Expected type(s) for {ext}:{RESET}")
             for t in expected[:5]:
                 print(f"  - {t}")
+
+    # Deep inspect findings
+    di = result.get("deep_inspect_report", {})
+    if di.get("suspicious"):
+        YELLOW = "\033[93m"
+        print(f"\n{YELLOW}{BOLD}⚠  Deep Inspection Findings:{RESET}")
+        for finding in di.get("findings", []):
+            print(f"   • {finding}")
+
+    # Binwalk suggestion
+    if result.get("binwalk_suggested"):
+        CYAN = "\033[96m"
+        fname = result["filename"]
+        print(f"\n{CYAN}{BOLD}🔍 Recommended:{RESET}{CYAN} Run binwalk for further analysis:{RESET}")
+        print(f"   {CYAN}binwalk -e \"{fname}\"{RESET}")
+        print(f"   {CYAN}binwalk --dd='.*' \"{fname}\"   (extract all embedded files){RESET}")
 
     print(f"{'─'*62}")
 
