@@ -1,7 +1,7 @@
 # HexGuard 🛡️
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 ![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)
 ![Use Case](https://img.shields.io/badge/Use%20Case-CTF%20%7C%20Malware%20Triage-red?style=flat-square)
 
