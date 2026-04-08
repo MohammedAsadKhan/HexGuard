@@ -140,6 +140,18 @@ options:
 ## Sample Output
 
 **Clean file:**
+![Clean verdict](assets/img_clean.png)
+
+**PNG disguised as JPEG (header swap):**
+![Critical header swap](assets/img_critical.png)
+
+**PNG disguised as Word document:**
+![Doc swap](assets/img_doc_swap.png)
+
+**Scan summary:**
+![Scan summary](assets/img_summary.png)
+
+**Clean file:**
 ```
 ──────────────────────────────────────────────────────────────
 File:     real_photo.jpg
