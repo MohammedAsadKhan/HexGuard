@@ -140,6 +140,7 @@ options:
 ## Sample Output
 
 **Clean file:**
+
 ![Clean verdict](assets/img_clean.png)
 
 **PNG disguised as JPEG (header swap):**
